@@ -401,6 +401,17 @@ def get_engine_args():
         if os.getenv("MAX_PARALLEL_LOADING_WORKERS"):
             logging.warning("Overriding MAX_PARALLEL_LOADING_WORKERS with None because more than 1 GPU is available.")
     
+    # LMCache requires HMA to be disabled
+    _kv_transfer = args.get("kv_transfer_config")
+    _kv_offload = args.get("kv_offloading_backend")
+    _lmcache_active = _kv_offload == "lmcache" or (
+        isinstance(_kv_transfer, dict)
+        and "lmcache" in str(_kv_transfer.get("kv_connector", "")).lower()
+    )
+    if _lmcache_active and not args.get("disable_hybrid_kv_cache_manager"):
+        args["disable_hybrid_kv_cache_manager"] = True
+        logging.info("LMCache detected: automatically setting disable_hybrid_kv_cache_manager=True")
+
     # Deprecated env args backwards compatibility
     if args.get("kv_cache_dtype") == "fp8_e5m2":
         args["kv_cache_dtype"] = "fp8"
