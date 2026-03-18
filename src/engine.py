@@ -8,6 +8,8 @@ from typing import AsyncGenerator, Optional
 from dotenv import load_dotenv
 from vllm import AsyncLLMEngine
 from vllm.entrypoints.logger import RequestLogger
+from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest, AnthropicMessagesResponse, AnthropicError, AnthropicErrorResponse
+from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
@@ -15,6 +17,8 @@ from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.protocol import BaseModelPath, LoRAModulePath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest, ResponsesResponse
+from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
 
 from constants import DEFAULT_BATCH_SIZE, DEFAULT_BATCH_SIZE_GROWTH_FACTOR, DEFAULT_MAX_CONCURRENCY, DEFAULT_MIN_BATCH_SIZE
 from engine_args import get_engine_args
@@ -275,6 +279,36 @@ class OpenAIvLLMEngine(vLLMEngine):
             enable_force_include_usage=os.getenv('ENABLE_FORCE_INCLUDE_USAGE', 'false').lower() == 'true',
             log_error_stack=os.getenv('LOG_ERROR_STACK', 'false').lower() == 'true',
         )
+        self.responses_engine = OpenAIServingResponses(
+            engine_client=self.llm,
+            models=self.serving_models,
+            request_logger=None,
+            chat_template=chat_template,
+            chat_template_content_format="auto",
+            return_tokens_as_token_ids=os.getenv('RETURN_TOKENS_AS_TOKEN_IDS', 'false').lower() == 'true',
+            reasoning_parser=os.getenv('REASONING_PARSER', "") or "",
+            enable_auto_tools=os.getenv('ENABLE_AUTO_TOOL_CHOICE', 'false').lower() == 'true',
+            tool_parser=os.getenv('TOOL_CALL_PARSER', "") or None,
+            tool_server=None,
+            enable_prompt_tokens_details=os.getenv('ENABLE_PROMPT_TOKENS_DETAILS', 'false').lower() == 'true',
+            enable_force_include_usage=os.getenv('ENABLE_FORCE_INCLUDE_USAGE', 'false').lower() == 'true',
+            enable_log_outputs=os.getenv('ENABLE_LOG_OUTPUTS', 'false').lower() == 'true',
+            log_error_stack=os.getenv('LOG_ERROR_STACK', 'false').lower() == 'true',
+        )
+        self.messages_engine = AnthropicServingMessages(
+            engine_client=self.llm,
+            models=self.serving_models,
+            response_role=self.response_role,
+            request_logger=None,
+            chat_template=chat_template,
+            chat_template_content_format="auto",
+            return_tokens_as_token_ids=os.getenv('RETURN_TOKENS_AS_TOKEN_IDS', 'false').lower() == 'true',
+            reasoning_parser=os.getenv('REASONING_PARSER', "") or "",
+            enable_auto_tools=os.getenv('ENABLE_AUTO_TOOL_CHOICE', 'false').lower() == 'true',
+            tool_parser=os.getenv('TOOL_CALL_PARSER', "") or None,
+            enable_prompt_tokens_details=os.getenv('ENABLE_PROMPT_TOKENS_DETAILS', 'false').lower() == 'true',
+            enable_force_include_usage=os.getenv('ENABLE_FORCE_INCLUDE_USAGE', 'false').lower() == 'true',
+        )
 
         if hasattr(self.chat_engine, 'warmup'):
             await self.chat_engine.warmup()
@@ -287,6 +321,12 @@ class OpenAIvLLMEngine(vLLMEngine):
             yield await self._handle_model_request()
         elif openai_request.openai_route in ["/v1/chat/completions", "/v1/completions"]:
             async for response in self._handle_chat_or_completion_request(openai_request):
+                yield response
+        elif openai_request.openai_route == "/v1/responses":
+            async for response in self._handle_responses_request(openai_request):
+                yield response
+        elif openai_request.openai_route == "/v1/messages":
+            async for response in self._handle_messages_request(openai_request):
                 yield response
         else:
             yield create_error_response("Invalid route").model_dump()
@@ -342,4 +382,45 @@ class OpenAIvLLMEngine(vLLMEngine):
                 if self.raw_openai_output:
                     batch = "".join(batch)
                 yield batch
+
+    async def _handle_responses_request(self, openai_request: JobInput):
+        try:
+            request = ResponsesRequest(**openai_request.openai_input)
+        except Exception as e:
+            yield create_error_response(str(e)).model_dump()
+            return
+
+        dummy_request = DummyRequest()
+        response = await self.responses_engine.create_responses(request, raw_request=dummy_request)
+
+        if isinstance(response, (ErrorResponse, ResponsesResponse)):
+            yield response.model_dump()
+            return
+
+        async for event in response:
+            event_type = getattr(event, "type", "unknown")
+            yield f"event: {event_type}\ndata: {event.model_dump_json(indent=None)}\n\n"
+
+    async def _handle_messages_request(self, openai_request: JobInput):
+        try:
+            request = AnthropicMessagesRequest(**openai_request.openai_input)
+        except Exception as e:
+            yield create_error_response(str(e)).model_dump()
+            return
+
+        dummy_request = DummyRequest()
+        response = await self.messages_engine.create_messages(request, raw_request=dummy_request)
+
+        if isinstance(response, ErrorResponse):
+            yield AnthropicErrorResponse(
+                error=AnthropicError(type=response.error.type, message=response.error.message)
+            ).model_dump()
+            return
+
+        if isinstance(response, AnthropicMessagesResponse):
+            yield response.model_dump(exclude_none=True)
+            return
+
+        async for chunk in response:
+            yield chunk
             
