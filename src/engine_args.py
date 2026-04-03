@@ -402,15 +402,32 @@ def get_engine_args():
             logging.warning("Overriding MAX_PARALLEL_LOADING_WORKERS with None because more than 1 GPU is available.")
     
     # LMCache requires HMA to be disabled
-    _kv_transfer = args.get("kv_transfer_config")
-    _kv_offload = args.get("kv_offloading_backend")
-    _lmcache_active = _kv_offload == "lmcache" or (
-        isinstance(_kv_transfer, dict)
-        and "lmcache" in str(_kv_transfer.get("kv_connector", "")).lower()
-    )
-    if _lmcache_active and not args.get("disable_hybrid_kv_cache_manager"):
-        args["disable_hybrid_kv_cache_manager"] = True
-        logging.info("LMCache detected: automatically setting disable_hybrid_kv_cache_manager=True")
+    try:
+        _kv_transfer = args.get("kv_transfer_config")
+        _kv_offload = args.get("kv_offloading_backend")
+
+        lmcache_detected = _kv_offload == "lmcache" or (
+            isinstance(_kv_transfer, dict)
+            and isinstance(_kv_transfer.get("kv_connector"), str)
+            and "lmcache" in _kv_transfer.get("kv_connector", "").lower()
+        )
+
+        if lmcache_detected and not args.get("disable_hybrid_kv_cache_manager"):
+            args["disable_hybrid_kv_cache_manager"] = True
+            args["kv_offloading_backend"] = None
+            args["kv_transfer_config"] = None
+            logging.info("LMCache detected: automatically setting disable_hybrid_kv_cache_manager=True and clearing conflicting settings")
+        elif lmcache_detected and args.get("disable_hybrid_kv_cache_manager") is False:
+            logging.warning(
+                "LMCache configuration detected but disabled: "
+                "disable_hybrid_kv_cache_manager must be False when using LMCache"
+            )
+    except Exception as e:
+        logging.error(
+            "Failed to check LMCache configuration: %s",
+            e,
+            exc_info=True
+        )
 
     # Deprecated env args backwards compatibility
     if args.get("kv_cache_dtype") == "fp8_e5m2":

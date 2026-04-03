@@ -4,7 +4,7 @@ Run LLMs using [vLLM](https://docs.vllm.ai) with an OpenAI-compatible API
 
 ---
 
-[![Runpod](https://api.runpod.io/badge/runpod-workers/worker-vllm)](https://www.runpod.io/console/hub/runpod-workers/worker-vllm)
+[![RunPod](https://api.runpod.io/badge/runpod-workers/worker-vllm)](https://www.runpod.io/console/hub/runpod-workers/worker-vllm)
 
 ---
 
@@ -34,11 +34,11 @@ For complete configuration options, see the [full configuration documentation](h
 
 ## API Usage
 
-This worker supports two API formats: **Runpod native** and **OpenAI-compatible**.
+This worker supports two API formats: **RunPod native** and **OpenAI-compatible**.
 
-### Runpod Native API
+### RunPod Native API
 
-For testing directly in the Runpod UI, use these examples in your endpoint's request tab.
+For testing directly in the RunPod UI, use these examples in your endpoint's request tab.
 
 #### Chat Completions
 
@@ -104,7 +104,7 @@ For direct text generation without chat format:
 
 ### OpenAI-Compatible API
 
-For external clients and SDKs, use the `/openai/v1` path prefix with your Runpod API key.
+For external clients and SDKs, use the `/openai/v1` path prefix with your RunPod API key.
 
 #### Chat Completions
 
@@ -157,6 +157,35 @@ For external clients and SDKs, use the `/openai/v1` path prefix with your Runpod
 {}
 ```
 
+#### OpenAI Responses API
+
+**Path:** `/openai/v1/responses`
+
+Supports the [OpenAI Responses API](https://platform.openai.com/docs/api-reference/responses) format. Note: this route bypasses the RunPod queue and is served directly — use `/openai/` prefixed paths rather than the RunPod job queue for these endpoints.
+
+```json
+{
+  "model": "meta-llama/Llama-3.1-8B-Instruct",
+  "input": "Tell me a joke."
+}
+```
+
+#### Anthropic Messages API
+
+**Path:** `/anthropic/v1/messages`
+
+Supports the [Anthropic Messages API](https://docs.anthropic.com/en/api/messages) format. Served directly, bypassing the RunPod queue.
+
+```json
+{
+  "model": "meta-llama/Llama-3.1-8B-Instruct",
+  "max_tokens": 256,
+  "messages": [
+    {"role": "user", "content": "Hello!"}
+  ]
+}
+```
+
 #### Response Format
 
 Both APIs return the same response format:
@@ -180,7 +209,7 @@ Both APIs return the same response format:
 
 Below are minimal `python` snippets so you can copy-paste to get started quickly.
 
-> Replace `<ENDPOINT_ID>` with your endpoint ID and `<API_KEY>` with a [Runpod API key](https://docs.runpod.io/get-started/api-keys).
+> Replace `<ENDPOINT_ID>` with your endpoint ID and `<API_KEY>` with a [RunPod API key](https://docs.runpod.io/get-started/api-keys).
 
 ### OpenAI compatible API
 

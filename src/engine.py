@@ -384,36 +384,112 @@ class OpenAIvLLMEngine(vLLMEngine):
                 yield batch
 
     async def _handle_responses_request(self, openai_request: JobInput):
+        request_id = getattr(openai_request, "request_id", "unknown")
+
         try:
             request = ResponsesRequest(**openai_request.openai_input)
         except Exception as e:
-            yield create_error_response(str(e)).model_dump()
+            logging.error(
+                "Invalid ResponsesRequest JSON: %s",
+                e,
+                extra={"request_id": request_id}
+            )
+            yield create_error_response(
+                "Invalid request format",
+                err_type="BadRequestError"
+            ).model_dump()
             return
 
         dummy_request = DummyRequest()
-        response = await self.responses_engine.create_responses(request, raw_request=dummy_request)
+        try:
+            response = await self.responses_engine.create_responses(request, raw_request=dummy_request)
+        except Exception as e:
+            logging.error(
+                "Failed to create Responses: %s",
+                e,
+                extra={"request_id": request_id},
+                exc_info=True
+            )
+            if isinstance(response, ErrorResponse):
+                yield response.model_dump()
+            else:
+                yield create_error_response(
+                    "Internal server error during response generation",
+                    err_type="InternalServerError"
+                ).model_dump()
+            return
 
         if isinstance(response, (ErrorResponse, ResponsesResponse)):
             yield response.model_dump()
             return
 
-        async for event in response:
-            event_type = getattr(event, "type", "unknown")
-            yield f"event: {event_type}\ndata: {event.model_dump_json(indent=None)}\n\n"
-
+        try:
+            async for event in response:
+                if not hasattr(event, "type"):
+                    continue
+                event_type = getattr(event, "type", "unknown")
+                yield f"event: {event_type}\ndata: {event.model_dump_json(indent=None)}\n\n"
+        except Exception as e:
+            logging.error(
+                "Error processing responses stream: %s",
+                e,
+                extra={"request_id": request_id},
+                exc_info=True
+            )
+            yield create_error_response(
+                "Streaming response failed",
+                err_type="InternalServerError"
+            ).model_dump()
     async def _handle_messages_request(self, openai_request: JobInput):
+        request_id = getattr(openai_request, "request_id", "unknown")
+
         try:
             request = AnthropicMessagesRequest(**openai_request.openai_input)
         except Exception as e:
-            yield create_error_response(str(e)).model_dump()
+            logging.error(
+                "Invalid AnthropicMessagesRequest: %s",
+                e,
+                extra={"request_id": request_id}
+            )
+            yield AnthropicErrorResponse(
+                error=AnthropicError(
+                    type="invalid_request_error",
+                    message="Invalid request format"
+                )
+            ).model_dump()
             return
 
         dummy_request = DummyRequest()
-        response = await self.messages_engine.create_messages(request, raw_request=dummy_request)
+
+        try:
+            response = await self.messages_engine.create_messages(request, raw_request=dummy_request)
+        except Exception as e:
+            logging.error(
+                "Failed to create messages: %s",
+                e,
+                extra={"request_id": request_id},
+                exc_info=True
+            )
+            if isinstance(response, ErrorResponse):
+                error_type = getattr(response, "type", "internal_error")
+                error_message = getattr(response, "message", str(e)[:200])
+                yield AnthropicErrorResponse(
+                    error=AnthropicError(type=error_type, message=error_message)
+                ).model_dump()
+            else:
+                yield AnthropicErrorResponse(
+                    error=AnthropicError(
+                        type="internal_error",
+                        message="Failed to generate messages"
+                    )
+                ).model_dump()
+            return
 
         if isinstance(response, ErrorResponse):
+            error_type = getattr(response, "type", "internal_error")
+            error_message = getattr(response, "message", "Unknown error")
             yield AnthropicErrorResponse(
-                error=AnthropicError(type=response.error.type, message=response.error.message)
+                error=AnthropicError(type=error_type, message=error_message)
             ).model_dump()
             return
 
@@ -421,6 +497,19 @@ class OpenAIvLLMEngine(vLLMEngine):
             yield response.model_dump(exclude_none=True)
             return
 
-        async for chunk in response:
-            yield chunk
-            
+        try:
+            async for chunk in response:
+                yield chunk
+        except Exception as e:
+            logging.error(
+                "Error streaming messages: %s",
+                e,
+                extra={"request_id": request_id},
+                exc_info=True
+            )
+            yield AnthropicErrorResponse(
+                error=AnthropicError(
+                    type="internal_error",
+                    message="Error while streaming messages"
+                )
+            ).model_dump()
