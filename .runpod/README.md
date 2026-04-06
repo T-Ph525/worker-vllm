@@ -32,6 +32,9 @@ All behaviour is controlled through environment variables:
 
 For complete configuration options, see the [full configuration documentation](https://github.com/runpod-workers/worker-vllm/blob/main/docs/configuration.md).
 
+### Specify Transformers Version
+To change the version of the [Transformers library](https://github.com/huggingface/transformers) use the `TRANSFORMERS_VERSION` environment variable to specify the version you want to use. Note this might break the handler, so use for development purposes. 
+
 ## API Usage
 
 This worker supports two API formats: **RunPod native** and **OpenAI-compatible**.
