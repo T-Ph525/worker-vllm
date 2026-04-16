@@ -30,6 +30,8 @@ Current vLLM version: [0.16.0](https://github.com/vllm-project/vllm/releases/tag
   - [Examples: Using your Runpod endpoint with OpenAI](#examples-using-your-runpod-endpoint-with-openai)
     - [Chat Completions](#chat-completions)
     - [Getting a list of names for available models](#getting-a-list-of-names-for-available-models)
+    - [OpenAI Responses API](#openai-responses-api)
+    - [Anthropic Messages API](#anthropic-messages-api)
 - [Usage: Standard (Non-OpenAI)](#usage-standard-non-openai)
   - [Request Input Parameters](#request-input-parameters)
   - [Sampling Parameters](#sampling-parameters)
@@ -152,7 +154,7 @@ You can deploy **any model on Hugging Face** that is supported by vLLM. For the 
 
 # Usage: OpenAI Compatibility
 
-The vLLM Worker is fully compatible with OpenAI's API, and you can use it with any OpenAI Codebase by changing only 3 lines in total. The supported routes are <ins>Chat Completions</ins> and <ins>Models</ins> - with both streaming and non-streaming.
+The vLLM Worker is fully compatible with OpenAI's API, and you can use it with any OpenAI Codebase by changing only 3 lines in total. The supported routes are <ins>Chat Completions</ins>, <ins>Models</ins> <ins>Responses</ins>, and <ins>Messages</ins> - with both streaming and non-streaming.
 
 ## Modifying your OpenAI Codebase to use your deployed vLLM Worker
 
@@ -333,6 +335,62 @@ In the case of baking the model into the image, sometimes the repo may not be ac
 models_response = client.models.list()
 list_of_models = [model.id for model in models_response]
 print(list_of_models)
+```
+
+### OpenAI Responses API
+
+**Path:** `/openai/v1/responses` (full URL: `https://api.runpod.ai/v2/<YOUR ENDPOINT ID>/openai/v1/responses`)
+
+Supports the [OpenAI Responses API](https://platform.openai.com/docs/api-reference/responses) request shape. Like other `/openai/` routes, this is served directly—use the `/openai/` prefix rather than the RunPod native job queue for these calls.
+
+```json
+{
+  "model": "meta-llama/Llama-3.1-8B-Instruct",
+  "input": "Tell me a joke."
+}
+```
+
+**Using HTTP requests:**
+
+```bash
+curl https://api.runpod.ai/v2/<YOUR ENDPOINT ID>/openai/v1/responses \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <YOUR RUNPOD API KEY>" \
+  -d '{
+    "model": "<YOUR DEPLOYED MODEL REPO/NAME>",
+    "input": "Tell me a joke."
+  }'
+```
+
+### Anthropic Messages API
+
+**Path:** `/openai/v1/messages` (full URL: `https://api.runpod.ai/v2/<YOUR ENDPOINT ID>/openai/v1/messages`)
+
+Supports the [Anthropic Messages API](https://docs.anthropic.com/en/api/messages) format. Served directly, bypassing the RunPod queue.
+
+```json
+{
+  "model": "meta-llama/Llama-3.1-8B-Instruct",
+  "max_tokens": 256,
+  "messages": [
+    {"role": "user", "content": "Hello!"}
+  ]
+}
+```
+
+**Using HTTP requests:**
+
+```bash
+curl https://api.runpod.ai/v2/<YOUR ENDPOINT ID>/openai/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <YOUR RUNPOD API KEY>" \
+  -d '{
+    "model": "<YOUR DEPLOYED MODEL REPO/NAME>",
+    "max_tokens": 256,
+    "messages": [
+      {"role": "user", "content": "Hello!"}
+    ]
+  }'
 ```
 
 # Usage: Standard (Non-OpenAI)
