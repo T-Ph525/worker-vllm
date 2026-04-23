@@ -175,7 +175,7 @@ Supports the [OpenAI Responses API](https://platform.openai.com/docs/api-referen
 
 #### Anthropic Messages API
 
-**Path:** `/anthropic/v1/messages`
+**Path:** `/openai/v1/messages`
 
 Supports the [Anthropic Messages API](https://docs.anthropic.com/en/api/messages) format. Served directly, bypassing the RunPod queue.
 
