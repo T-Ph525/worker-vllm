@@ -442,14 +442,17 @@ def get_engine_args():
         )
         lmcache_detected = lmcache_via_offload or lmcache_via_transfer
 
-        if lmcache_detected and not args.get("disable_hybrid_kv_cache_manager"):
-            args["disable_hybrid_kv_cache_manager"] = True
-            logging.info("LMCache detected: automatically setting disable_hybrid_kv_cache_manager=True")
-        elif lmcache_detected and args.get("disable_hybrid_kv_cache_manager") is False:
-            logging.warning(
-                "LMCache configuration detected but disabled: "
-                "disable_hybrid_kv_cache_manager must be False when using LMCache"
-            )
+        if lmcache_detected:
+            current = args.get("disable_hybrid_kv_cache_manager")
+            if current is False:
+                logging.warning(
+                    "disable_hybrid_kv_cache_manager=False conflicts with LMCache; "
+                    "overriding to True (HMA must be disabled when using LMCache)"
+                )
+                args["disable_hybrid_kv_cache_manager"] = True
+            elif current is None:
+                args["disable_hybrid_kv_cache_manager"] = True
+                logging.info("LMCache detected: automatically setting disable_hybrid_kv_cache_manager=True")
     except Exception as e:
         logging.error(
             "Failed to check LMCache configuration: %s",

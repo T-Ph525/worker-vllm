@@ -410,13 +410,10 @@ class OpenAIvLLMEngine(vLLMEngine):
                 extra={"request_id": request_id},
                 exc_info=True
             )
-            if isinstance(response, ErrorResponse):
-                yield response.model_dump()
-            else:
-                yield create_error_response(
-                    "Internal server error during response generation",
-                    err_type="InternalServerError"
-                ).model_dump()
+            yield create_error_response(
+                "Internal server error during response generation",
+                err_type="InternalServerError"
+            ).model_dump()
             return
 
         if isinstance(response, (ErrorResponse, ResponsesResponse)):
@@ -436,10 +433,12 @@ class OpenAIvLLMEngine(vLLMEngine):
                 extra={"request_id": request_id},
                 exc_info=True
             )
-            yield create_error_response(
+            error_payload = create_error_response(
                 "Streaming response failed",
                 err_type="InternalServerError"
-            ).model_dump()
+            ).model_dump_json()
+            yield f"event: error\ndata: {error_payload}\n\n"
+
     async def _handle_messages_request(self, openai_request: JobInput):
         request_id = getattr(openai_request, "request_id", "unknown")
 
@@ -470,19 +469,12 @@ class OpenAIvLLMEngine(vLLMEngine):
                 extra={"request_id": request_id},
                 exc_info=True
             )
-            if isinstance(response, ErrorResponse):
-                error_type = getattr(response, "type", "internal_error")
-                error_message = getattr(response, "message", str(e)[:200])
-                yield AnthropicErrorResponse(
-                    error=AnthropicError(type=error_type, message=error_message)
-                ).model_dump()
-            else:
-                yield AnthropicErrorResponse(
-                    error=AnthropicError(
-                        type="internal_error",
-                        message="Failed to generate messages"
-                    )
-                ).model_dump()
+            yield AnthropicErrorResponse(
+                error=AnthropicError(
+                    type="internal_error",
+                    message="Failed to generate messages"
+                )
+            ).model_dump()
             return
 
         if isinstance(response, ErrorResponse):
@@ -507,9 +499,10 @@ class OpenAIvLLMEngine(vLLMEngine):
                 extra={"request_id": request_id},
                 exc_info=True
             )
-            yield AnthropicErrorResponse(
+            error_payload = AnthropicErrorResponse(
                 error=AnthropicError(
                     type="internal_error",
                     message="Error while streaming messages"
                 )
-            ).model_dump()
+            ).model_dump_json()
+            yield f"event: error\ndata: {error_payload}\n\n"
