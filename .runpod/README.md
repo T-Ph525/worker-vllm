@@ -1,4 +1,4 @@
-![vLLM worker banner](https://cpjrphpz3t5wbwfe.public.blob.vercel-storage.com/worker-vllm_banner.jpeg)
+![vLLM worker banner](https://image.runpod.ai/preview/vllm/vllm-banner.png)
 
 Run LLMs using [vLLM](https://docs.vllm.ai) with an OpenAI-compatible API
 
@@ -31,6 +31,9 @@ All behaviour is controlled through environment variables:
 **Pass any vLLM engine arg** not listed above by setting an env var with the **UPPERCASED** field name (e.g. `MAX_MODEL_LEN=4096`, `ENABLE_CHUNKED_PREFILL=true`). The worker auto-discovers all `AsyncEngineArgs` fields from env. See the [vLLM engine args docs](https://docs.vllm.ai/en/latest/configuration/engine_args) for all available options.
 
 For complete configuration options, see the [full configuration documentation](https://github.com/runpod-workers/worker-vllm/blob/main/docs/configuration.md).
+
+### Specify Transformers Version
+To change the version of the [Transformers library](https://github.com/huggingface/transformers) use the `TRANSFORMERS_VERSION` environment variable to specify the version you want to use. Note this might break the handler, so use for development purposes. 
 
 ## API Usage
 
@@ -157,6 +160,35 @@ For external clients and SDKs, use the `/openai/v1` path prefix with your RunPod
 {}
 ```
 
+#### OpenAI Responses API
+
+**Path:** `/openai/v1/responses`
+
+Supports the [OpenAI Responses API](https://platform.openai.com/docs/api-reference/responses) format. Note: this route bypasses the RunPod queue and is served directly — use `/openai/` prefixed paths rather than the RunPod job queue for these endpoints.
+
+```json
+{
+  "model": "meta-llama/Llama-3.1-8B-Instruct",
+  "input": "Tell me a joke."
+}
+```
+
+#### Anthropic Messages API
+
+**Path:** `/openai/v1/messages`
+
+Supports the [Anthropic Messages API](https://docs.anthropic.com/en/api/messages) format. Served directly, bypassing the RunPod queue.
+
+```json
+{
+  "model": "meta-llama/Llama-3.1-8B-Instruct",
+  "max_tokens": 256,
+  "messages": [
+    {"role": "user", "content": "Hello!"}
+  ]
+}
+```
+
 #### Response Format
 
 Both APIs return the same response format:
@@ -190,7 +222,7 @@ Minimal Python example using the official `openai` SDK:
 from openai import OpenAI
 import os
 
-# Initialize the OpenAI Client with your RunPod API Key and Endpoint URL
+# Initialize the OpenAI Client with your Runpod API Key and Endpoint URL
 client = OpenAI(
     api_key=os.getenv("RUNPOD_API_KEY"),
     base_url=f"https://api.runpod.ai/v2/<ENDPOINT_ID>/openai/v1",

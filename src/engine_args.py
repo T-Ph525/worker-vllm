@@ -1,3 +1,4 @@
+import ast
 import os
 import json
 import logging
@@ -113,6 +114,17 @@ def _convert_env_value_to_field_type(value: str, field_name: str, field_type: ty
         except (json.JSONDecodeError, TypeError):
             pass
         return tuple(elem_type(x.strip()) for x in str(val).split(",") if x.strip())
+    # For dataclass/complex types, try JSON then Python literal parsing to dict
+    try:
+        return json.loads(val)
+    except (json.JSONDecodeError, TypeError):
+        pass
+    try:
+        parsed = ast.literal_eval(val)
+        if isinstance(parsed, (dict, list)):
+            return parsed
+    except (ValueError, SyntaxError):
+        pass
     # Fallback: try int, float, then str
     try:
         return int(val)
@@ -401,6 +413,53 @@ def get_engine_args():
         if os.getenv("MAX_PARALLEL_LOADING_WORKERS"):
             logging.warning("Overriding MAX_PARALLEL_LOADING_WORKERS with None because more than 1 GPU is available.")
     
+    # LMCache requires HMA to be disabled
+    try:
+        _kv_transfer = args.get("kv_transfer_config")
+        if isinstance(_kv_transfer, str):
+            parsed = None
+            try:
+                parsed = json.loads(_kv_transfer)
+            except (json.JSONDecodeError, TypeError):
+                pass
+            if parsed is None:
+                try:
+                    result = ast.literal_eval(_kv_transfer)
+                    if isinstance(result, dict):
+                        parsed = result
+                except (ValueError, SyntaxError):
+                    pass
+            if parsed is not None:
+                _kv_transfer = parsed
+                args["kv_transfer_config"] = _kv_transfer
+        _kv_offload = args.get("kv_offloading_backend")
+
+        lmcache_via_offload = _kv_offload == "lmcache"
+        lmcache_via_transfer = (
+            isinstance(_kv_transfer, dict)
+            and isinstance(_kv_transfer.get("kv_connector"), str)
+            and "lmcache" in _kv_transfer.get("kv_connector", "").lower()
+        )
+        lmcache_detected = lmcache_via_offload or lmcache_via_transfer
+
+        if lmcache_detected:
+            current = args.get("disable_hybrid_kv_cache_manager")
+            if current is False:
+                logging.warning(
+                    "disable_hybrid_kv_cache_manager=False conflicts with LMCache; "
+                    "overriding to True (HMA must be disabled when using LMCache)"
+                )
+                args["disable_hybrid_kv_cache_manager"] = True
+            elif current is None:
+                args["disable_hybrid_kv_cache_manager"] = True
+                logging.info("LMCache detected: automatically setting disable_hybrid_kv_cache_manager=True")
+    except Exception as e:
+        logging.error(
+            "Failed to check LMCache configuration: %s",
+            e,
+            exc_info=True
+        )
+
     # Deprecated env args backwards compatibility
     if args.get("kv_cache_dtype") == "fp8_e5m2":
         args["kv_cache_dtype"] = "fp8"
