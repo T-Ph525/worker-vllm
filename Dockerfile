@@ -1,19 +1,21 @@
-FROM nvidia/cuda:12.1.0-base-ubuntu22.04 
+FROM nvidia/cuda:12.9.1-base-ubuntu22.04 
 
 RUN apt-get update -y \
-    && apt-get install -y python3-pip
+    && apt-get install -y python3-pip curl \
+    && curl -LsSf https://astral.sh/uv/0.10.9/install.sh  | sh
 
-RUN ldconfig /usr/local/cuda-12.1/compat/
+ENV PATH="/root/.local/bin:$PATH"
 
-# Install Python dependencies
+RUN ldconfig /usr/local/cuda-12.9/compat/
+
+# Install vLLM with FlashInfer - use CUDA 12.9 PyTorch wheels
+RUN uv pip install --system "packaging>=24.2" && \
+    uv pip install --system "vllm[flashinfer]==0.16.0" --extra-index-url https://download.pytorch.org/whl/cu129
+
+# Install additional Python dependencies (after vLLM to avoid PyTorch version conflicts)
 COPY builder/requirements.txt /requirements.txt
-RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install --upgrade pip && \
-    python3 -m pip install --upgrade -r /requirements.txt
-
-# Install vLLM (switching back to pip installs since issues that required building fork are fixed and space optimization is not as important since caching) and FlashInfer 
-RUN python3 -m pip install vllm==0.9.1 && \
-    python3 -m pip install flashinfer -i https://flashinfer.ai/whl/cu121/torch2.3
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system -r /requirements.txt
 
 # Setup for Option 2: Building the Image with the Model included
 ARG MODEL_NAME="Nitral-AI/Nera_Noctis-12B"
@@ -22,6 +24,7 @@ ARG BASE_PATH="/runpod-volume"
 ARG QUANTIZATION=""
 ARG MODEL_REVISION=""
 ARG TOKENIZER_REVISION=""
+ARG VLLM_NIGHTLY="false"
 
 ENV MODEL_NAME=$MODEL_NAME \
     MODEL_REVISION=$MODEL_REVISION \
@@ -32,12 +35,25 @@ ENV MODEL_NAME=$MODEL_NAME \
     HF_DATASETS_CACHE="${BASE_PATH}/huggingface-cache/datasets" \
     HUGGINGFACE_HUB_CACHE="${BASE_PATH}/huggingface-cache/hub" \
     HF_HOME="${BASE_PATH}/huggingface-cache/hub" \
-    HF_HUB_ENABLE_HF_TRANSFER=0 
+    HF_HUB_ENABLE_HF_TRANSFER=0 \
+    # Suppress Ray metrics agent warnings (not needed in containerized environments)
+    RAY_METRICS_EXPORT_ENABLED=0 \
+    RAY_DISABLE_USAGE_STATS=1 \
+    # Prevent rayon thread pool panic in containers where ulimit -u < nproc
+    # (tokenizers uses Rust's rayon which tries to spawn threads = CPU cores)
+    TOKENIZERS_PARALLELISM=false \
+    RAYON_NUM_THREADS=4
 
 ENV PYTHONPATH="/:/vllm-workspace"
 
+RUN if [ "${VLLM_NIGHTLY}" = "true" ]; then \
+    uv pip install --system -U vllm --pre --index-url https://pypi.org/simple --extra-index-url https://wheels.vllm.ai/nightly && \
+    apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/* && \
+    uv pip install --system git+https://github.com/huggingface/transformers.git; \
+fi
 
 COPY src /src
+RUN chmod +x /src/start.sh
 RUN --mount=type=secret,id=HF_TOKEN,required=false \
     if [ -f /run/secrets/HF_TOKEN ]; then \
     export HF_TOKEN=$(cat /run/secrets/HF_TOKEN); \
@@ -47,4 +63,4 @@ RUN --mount=type=secret,id=HF_TOKEN,required=false \
     fi
 
 # Start the handler
-CMD ["python3", "/src/handler.py"]
+CMD ["/bin/bash", "/src/start.sh"]

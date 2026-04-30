@@ -1,59 +1,55 @@
+import sys
+import multiprocessing
+import traceback
 import runpod
-import logging
-import asyncio
-from utils import JobInput
-from engine import vLLMEngine, OpenAIvLLMEngine
+from runpod import RunPodLogger
 
-# Set up basic logging
-logging.basicConfig(level=logging.INFO)
+log = RunPodLogger()
 
-# Initialize engines outside the handler function
-logging.info("Initializing engines...")
-vllm_engine = vLLMEngine()
-openai_vllm_engine = OpenAIvLLMEngine(vllm_engine)
-logging.info("Engines initialized.")
+vllm_engine = None
+openai_engine = None
 
-async def async_handler(job):
+
+async def handler(job):
     try:
-        logging.info(f"Starting job processing for job: {job}")
-
-        # Access the input from the request
+        from utils import JobInput
         job_input = JobInput(job["input"])
-
-        # Determine which engine to use based on job input
-        engine = openai_vllm_engine if job_input.openai_route else vllm_engine
-
-        # Simulate or implement progress updates
-        total_updates = 5
-        for update_number in range(total_updates):
-            logging.info(f"Progress update {update_number + 1}/{total_updates}")
-            await asyncio.sleep(1)  # Simulate task processing
-
-            # Send progress update
-            runpod.serverless.progress_update(job, f"Progress: {update_number + 1}/{total_updates}")
-
-        # Process job with selected engine (simplified for the example)
+        engine = openai_engine if job_input.openai_route else vllm_engine
         results_generator = engine.generate(job_input)
-        results = []
         async for batch in results_generator:
-            results.extend(batch)
-
-        # Return the results and indicate the worker should be refreshed
-        return {
-            "refresh_worker": True,
-            "job_results": results
-        }
-
+            yield batch
     except Exception as e:
-        logging.error(f"Error during job processing: {e}")
-        return {
-            "error": str(e)
-        }
+        error_str = str(e)
+        full_traceback = traceback.format_exc()
 
-# Configure and start the Runpod serverless function
-runpod.serverless.start(
-    {
-        "handler": async_handler,  # Specify the async handler
-        "return_aggregate_stream": True,
-    }
-)
+        log.error(f"Error during inference: {error_str}")
+        log.error(f"Full traceback:\n{full_traceback}")
+
+        # CUDA errors = worker is broken, exit to let RunPod spin up a healthy one
+        if "CUDA" in error_str or "cuda" in error_str:
+            log.error("Terminating worker due to CUDA/GPU error")
+            sys.exit(1)
+
+        yield {"error": error_str}
+
+
+# Only run in main process to prevent re-initialization when vLLM spawns worker subprocesses
+if __name__ == "__main__" or multiprocessing.current_process().name == "MainProcess":
+
+    try:
+        from engine import vLLMEngine, OpenAIvLLMEngine
+
+        vllm_engine = vLLMEngine()
+        openai_engine = OpenAIvLLMEngine(vllm_engine)
+        log.info("vLLM engines initialized successfully")
+    except Exception as e:
+        log.error(f"Worker startup failed: {e}\n{traceback.format_exc()}")
+        sys.exit(1)
+
+    runpod.serverless.start(
+        {
+            "handler": handler,
+            "concurrency_modifier": lambda x: vllm_engine.max_concurrency if vllm_engine else 1,
+            "return_aggregate_stream": True,
+        }
+    )

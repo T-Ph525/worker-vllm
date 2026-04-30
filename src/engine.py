@@ -1,24 +1,29 @@
-import os
-import logging
-import json
 import asyncio
+import json
+import logging
+import os
+import time
+from typing import AsyncGenerator, Optional
 
 from dotenv import load_dotenv
-from typing import AsyncGenerator, Optional
-import time
-
 from vllm import AsyncLLMEngine
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
-from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest, CompletionRequest, ErrorResponse
-from vllm.entrypoints.openai.serving_models import BaseModelPath, LoRAModulePath, OpenAIServingModels
+from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest, AnthropicMessagesResponse, AnthropicError, AnthropicErrorResponse
+from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.openai.models.protocol import BaseModelPath, LoRAModulePath
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest, ResponsesResponse
+from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
 
-
-from utils import DummyRequest, JobInput, BatchSize, create_error_response
-from constants import DEFAULT_MAX_CONCURRENCY, DEFAULT_BATCH_SIZE, DEFAULT_BATCH_SIZE_GROWTH_FACTOR, DEFAULT_MIN_BATCH_SIZE
-from tokenizer import TokenizerWrapper
+from constants import DEFAULT_BATCH_SIZE, DEFAULT_BATCH_SIZE_GROWTH_FACTOR, DEFAULT_MAX_CONCURRENCY, DEFAULT_MIN_BATCH_SIZE
 from engine_args import get_engine_args
+from tokenizer import TokenizerWrapper
+from utils import BatchSize, DummyRequest, JobInput, create_error_response
 
 class vLLMEngine:
     def __init__(self, engine = None):
@@ -174,11 +179,30 @@ class vLLMEngine:
 class OpenAIvLLMEngine(vLLMEngine):
     def __init__(self, vllm_engine):
         super().__init__(vllm_engine)
-        self.served_model_name = os.getenv("OPENAI_SERVED_MODEL_NAME_OVERRIDE") or self.engine_args.model
+        self.served_model_name = os.getenv("OPENAI_SERVED_MODEL_NAME_OVERRIDE") or self.engine_args.served_model_name or self.engine_args.model
         self.response_role = os.getenv("OPENAI_RESPONSE_ROLE") or "assistant"
         self.lora_adapters = self._load_lora_adapters()
-        asyncio.run(self._initialize_engines())
-        self.raw_openai_output = bool(int(os.getenv("RAW_OPENAI_OUTPUT", 1)))
+
+        # Always defer OpenAI engine initialization to the first request.
+        # asyncio.run() creates a temporary event loop that gets closed, but async
+        # components (tokenizer pool, serving engines) bind futures to that loop.
+        # When Runpod's serverless handler runs in its own event loop, those futures
+        # are "attached to a different loop" causing RuntimeError.
+        # This affects all configurations, not just LoRA.
+        self._engines_initialized = False
+        if self.lora_adapters:
+            logging.info(f"LoRA mode: {len(self.lora_adapters)} adapter(s) will load on first request")
+            for adapter in self.lora_adapters:
+                logging.info(f"  - {adapter.name}: {adapter.path}")
+        else:
+            logging.info("OpenAI engines will initialize on first request")
+
+        # Handle both integer and boolean string values for RAW_OPENAI_OUTPUT
+        raw_output_env = os.getenv("RAW_OPENAI_OUTPUT", "1")
+        if raw_output_env.lower() in ('true', 'false'):
+            self.raw_openai_output = raw_output_env.lower() == 'true'
+        else:
+            self.raw_openai_output = bool(int(raw_output_env))
 
     def _load_lora_adapters(self):
         adapters = []
@@ -196,18 +220,30 @@ class OpenAIvLLMEngine(vLLMEngine):
                 continue
         return adapters
 
+    async def _ensure_engines_initialized(self):
+        """Initialize engines on first request to avoid event loop mismatch.
+
+        In Runpod Serverless, the startup code runs outside the handler's event
+        loop. Deferring initialization to the first request ensures all async
+        components (tokenizer pool, serving engines, LoRA state) are created in
+        the correct event loop context.
+        """
+        if not self._engines_initialized:
+            logging.info("Initializing OpenAI serving engines...")
+            await self._initialize_engines()
+            self._engines_initialized = True
+            logging.info("OpenAI serving engines initialized successfully")
+
     async def _initialize_engines(self):
-        self.model_config = await self.llm.get_model_config()
+        self.model_config = self.llm.model_config
         self.base_model_paths = [
-            BaseModelPath(name=self.engine_args.model, model_path=self.engine_args.model)
+            BaseModelPath(name=self.served_model_name, model_path=self.engine_args.model)
         ]
 
         self.serving_models = OpenAIServingModels(
             engine_client=self.llm,
-            model_config=self.model_config,
             base_model_paths=self.base_model_paths,
             lora_modules=self.lora_adapters,
-            prompt_adapters=None,
         )
         await self.serving_models.init_static_loras()
         
@@ -218,32 +254,79 @@ class OpenAIvLLMEngine(vLLMEngine):
         
         self.chat_engine = OpenAIServingChat(
             engine_client=self.llm, 
-            model_config=self.model_config,
             models=self.serving_models,
             response_role=self.response_role,
             request_logger=None,
             chat_template=chat_template,
             chat_template_content_format="auto",
-            # enable_reasoning=os.getenv('ENABLE_REASONING', 'false').lower() == 'true',
-            reasoning_parser= os.getenv('REASONING_PARSER', "") or None,
-            # return_token_as_token_ids=False,
+            trust_request_chat_template=os.getenv('TRUST_REQUEST_CHAT_TEMPLATE', 'false').lower() == 'true',
+            return_tokens_as_token_ids=os.getenv('RETURN_TOKENS_AS_TOKEN_IDS', 'false').lower() == 'true',
+            reasoning_parser=os.getenv('REASONING_PARSER', "") or "",
             enable_auto_tools=os.getenv('ENABLE_AUTO_TOOL_CHOICE', 'false').lower() == 'true',
+            exclude_tools_when_tool_choice_none=os.getenv('EXCLUDE_TOOLS_WHEN_TOOL_CHOICE_NONE', 'false').lower() == 'true',
             tool_parser=os.getenv('TOOL_CALL_PARSER', "") or None,
-            enable_prompt_tokens_details=False
+            enable_prompt_tokens_details=os.getenv('ENABLE_PROMPT_TOKENS_DETAILS', 'false').lower() == 'true',
+            enable_force_include_usage=os.getenv('ENABLE_FORCE_INCLUDE_USAGE', 'false').lower() == 'true',
+            enable_log_outputs=os.getenv('ENABLE_LOG_OUTPUTS', 'false').lower() == 'true',
+            log_error_stack=os.getenv('LOG_ERROR_STACK', 'false').lower() == 'true',
         )
         self.completion_engine = OpenAIServingCompletion(
-            engine_client=self.llm, 
-            model_config=self.model_config,
+            engine_client=self.llm,
             models=self.serving_models,
             request_logger=None,
-            # return_token_as_token_ids=False,
+            return_tokens_as_token_ids=os.getenv('RETURN_TOKENS_AS_TOKEN_IDS', 'false').lower() == 'true',
+            enable_prompt_tokens_details=os.getenv('ENABLE_PROMPT_TOKENS_DETAILS', 'false').lower() == 'true',
+            enable_force_include_usage=os.getenv('ENABLE_FORCE_INCLUDE_USAGE', 'false').lower() == 'true',
+            log_error_stack=os.getenv('LOG_ERROR_STACK', 'false').lower() == 'true',
         )
-    
+        self.responses_engine = OpenAIServingResponses(
+            engine_client=self.llm,
+            models=self.serving_models,
+            request_logger=None,
+            chat_template=chat_template,
+            chat_template_content_format="auto",
+            return_tokens_as_token_ids=os.getenv('RETURN_TOKENS_AS_TOKEN_IDS', 'false').lower() == 'true',
+            reasoning_parser=os.getenv('REASONING_PARSER', "") or "",
+            enable_auto_tools=os.getenv('ENABLE_AUTO_TOOL_CHOICE', 'false').lower() == 'true',
+            tool_parser=os.getenv('TOOL_CALL_PARSER', "") or None,
+            tool_server=None,
+            enable_prompt_tokens_details=os.getenv('ENABLE_PROMPT_TOKENS_DETAILS', 'false').lower() == 'true',
+            enable_force_include_usage=os.getenv('ENABLE_FORCE_INCLUDE_USAGE', 'false').lower() == 'true',
+            enable_log_outputs=os.getenv('ENABLE_LOG_OUTPUTS', 'false').lower() == 'true',
+            log_error_stack=os.getenv('LOG_ERROR_STACK', 'false').lower() == 'true',
+        )
+        self.messages_engine = AnthropicServingMessages(
+            engine_client=self.llm,
+            models=self.serving_models,
+            response_role=self.response_role,
+            request_logger=None,
+            chat_template=chat_template,
+            chat_template_content_format="auto",
+            return_tokens_as_token_ids=os.getenv('RETURN_TOKENS_AS_TOKEN_IDS', 'false').lower() == 'true',
+            reasoning_parser=os.getenv('REASONING_PARSER', "") or "",
+            enable_auto_tools=os.getenv('ENABLE_AUTO_TOOL_CHOICE', 'false').lower() == 'true',
+            tool_parser=os.getenv('TOOL_CALL_PARSER', "") or None,
+            enable_prompt_tokens_details=os.getenv('ENABLE_PROMPT_TOKENS_DETAILS', 'false').lower() == 'true',
+            enable_force_include_usage=os.getenv('ENABLE_FORCE_INCLUDE_USAGE', 'false').lower() == 'true',
+        )
+
+        if hasattr(self.chat_engine, 'warmup'):
+            await self.chat_engine.warmup()
+
     async def generate(self, openai_request: JobInput):
+        # Ensure engines are ready (no-op if already initialized at startup)
+        await self._ensure_engines_initialized()
+
         if openai_request.openai_route == "/v1/models":
             yield await self._handle_model_request()
         elif openai_request.openai_route in ["/v1/chat/completions", "/v1/completions"]:
             async for response in self._handle_chat_or_completion_request(openai_request):
+                yield response
+        elif openai_request.openai_route == "/v1/responses":
+            async for response in self._handle_responses_request(openai_request):
+                yield response
+        elif openai_request.openai_route == "/v1/messages":
+            async for response in self._handle_messages_request(openai_request):
                 yield response
         else:
             yield create_error_response("Invalid route").model_dump()
@@ -299,4 +382,127 @@ class OpenAIvLLMEngine(vLLMEngine):
                 if self.raw_openai_output:
                     batch = "".join(batch)
                 yield batch
-            
+
+    async def _handle_responses_request(self, openai_request: JobInput):
+        request_id = getattr(openai_request, "request_id", "unknown")
+
+        try:
+            request = ResponsesRequest(**openai_request.openai_input)
+        except Exception as e:
+            logging.error(
+                "Invalid ResponsesRequest JSON: %s",
+                e,
+                extra={"request_id": request_id}
+            )
+            yield create_error_response(
+                "Invalid request format",
+                err_type="BadRequestError"
+            ).model_dump()
+            return
+
+        dummy_request = DummyRequest()
+        try:
+            response = await self.responses_engine.create_responses(request, raw_request=dummy_request)
+        except Exception as e:
+            logging.error(
+                "Failed to create Responses: %s",
+                e,
+                extra={"request_id": request_id},
+                exc_info=True
+            )
+            yield create_error_response(
+                "Internal server error during response generation",
+                err_type="InternalServerError"
+            ).model_dump()
+            return
+
+        if isinstance(response, (ErrorResponse, ResponsesResponse)):
+            yield response.model_dump()
+            return
+
+        try:
+            async for event in response:
+                if not hasattr(event, "type"):
+                    continue
+                event_type = getattr(event, "type", "unknown")
+                yield f"event: {event_type}\ndata: {event.model_dump_json(indent=None)}\n\n"
+        except Exception as e:
+            logging.error(
+                "Error processing responses stream: %s",
+                e,
+                extra={"request_id": request_id},
+                exc_info=True
+            )
+            error_payload = create_error_response(
+                "Streaming response failed",
+                err_type="InternalServerError"
+            ).model_dump_json()
+            yield f"event: error\ndata: {error_payload}\n\n"
+
+    async def _handle_messages_request(self, openai_request: JobInput):
+        request_id = getattr(openai_request, "request_id", "unknown")
+
+        try:
+            request = AnthropicMessagesRequest(**openai_request.openai_input)
+        except Exception as e:
+            logging.error(
+                "Invalid AnthropicMessagesRequest: %s",
+                e,
+                extra={"request_id": request_id}
+            )
+            yield AnthropicErrorResponse(
+                error=AnthropicError(
+                    type="invalid_request_error",
+                    message="Invalid request format"
+                )
+            ).model_dump()
+            return
+
+        dummy_request = DummyRequest()
+
+        try:
+            response = await self.messages_engine.create_messages(request, raw_request=dummy_request)
+        except Exception as e:
+            logging.error(
+                "Failed to create messages: %s",
+                e,
+                extra={"request_id": request_id},
+                exc_info=True
+            )
+            yield AnthropicErrorResponse(
+                error=AnthropicError(
+                    type="internal_error",
+                    message="Failed to generate messages"
+                )
+            ).model_dump()
+            return
+
+        if isinstance(response, ErrorResponse):
+            error_type = getattr(response, "type", "internal_error")
+            error_message = getattr(response, "message", "Unknown error")
+            yield AnthropicErrorResponse(
+                error=AnthropicError(type=error_type, message=error_message)
+            ).model_dump()
+            return
+
+        if isinstance(response, AnthropicMessagesResponse):
+            yield response.model_dump(exclude_none=True)
+            return
+
+        try:
+            async for chunk in response:
+                yield chunk
+        except Exception as e:
+            logging.error(
+                "Error streaming messages: %s",
+                e,
+                extra={"request_id": request_id},
+                exc_info=True
+            )
+            error_payload = AnthropicErrorResponse(
+                error=AnthropicError(
+                    type="internal_error",
+                    message="Error while streaming messages"
+                )
+            ).model_dump_json()
+            yield f"event: error\ndata: {error_payload}\n\n"
