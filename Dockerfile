@@ -25,7 +25,7 @@ RUN python3 -m pip install --no-cache-dir --no-deps "vllm-bnb-plugin>=0.0.3"
 RUN test "$(python3 -c 'import vllm; print(vllm.__version__)')" = "${VLLM_VERSION#v}"
 
 # Setup for Option 2: building the image with the model baked in.
-ARG MODEL_NAME=""
+ARG MODEL_NAME="mrcuddle/CaptainEris-DavidAU-Fusion-12B"
 ARG MODEL_REVISION=""
 ARG TOKENIZER_NAME=""
 ARG TOKENIZER_REVISION=""
