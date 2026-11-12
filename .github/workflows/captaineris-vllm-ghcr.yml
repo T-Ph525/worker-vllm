@@ -1,0 +1,26 @@
+name: CaptainEris 12B preloaded vLLM
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'deployments/captaineris-12b/**'
+      - '.github/workflows/captaineris-vllm-ghcr.yml'
+permissions:
+  contents: read
+  packages: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./deployments/captaineris-12b
+          push: true
+          tags: ghcr.io/t-ph525/captaineris-vllm:latest
